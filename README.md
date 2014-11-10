@@ -18,6 +18,7 @@ Example:
 
       def down
         remove_index :table1, [:col1, :col2]
+        restore_duplicates(:table1)
       end
 
     end

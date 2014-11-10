@@ -21,10 +21,8 @@ The table in question MUST have a primary key column named 'id'
 
       def down
         remove_index :table1, [:col1, :col2]
-        restore_duplicates_from_backup
+        restore_duplicates(:table1)
       end
-
-   end
         
 =end
     def prefix_for_tables
@@ -36,23 +34,22 @@ The table in question MUST have a primary key column named 'id'
     end
 
     def backup_table_name(orig_table_name)
-      "#{namespace_for_backups}.#{prefix_for_tables}_#{orig_table_name}"
+      "#{quote_identifier(namespace_for_backups)}.#{quote_identifier([prefix_for_tables,orig_table_name].join('_'))}"
     end
 
     # Determine if we need to create a separate schema or a database to house the
     # backup tables
-    def namespace_equivalent_for_this_db
+    def namespace_equivalent_for_db_server
       # HACK!
-      if connection.respond_to?(:postgresql_connection)
-        return 'schema'
-      else
-        return 'database'
-      end
+      return connection.respond_to?(:postgresql_connection) ?  'schema' : 'database'
     end
 
     def ensure_namespace_exists(namespace)
-      namespace_equivalent_for_this_db = "schema"
-      namespace_creation_sql = "CREATE #{namespace_equivalent_for_this_db} IF NOT EXISTS#{quote_identifier(namespace)}"
+      namespace_equivalent_for_db_server = "schema"
+      namespace_creation_sql = <<-"EOSQL"
+        CREATE #{namespace_equivalent_for_db_server}
+          IF NOT EXISTS#{quote_identifier(namespace)}
+      EOSQL
 
       connection.execute(namespace_creation_sql)
     end
@@ -64,21 +61,20 @@ The table in question MUST have a primary key column named 'id'
     def create_backup_table(table)
       btn = backup_table_name(table)
       ensure_namespace_exists(namespace_for_backups)
-      sql = "CREATE TABLE IF NOT EXISTS #{quote_identifier(btn)} LIKE #{quote_identifier(table)}"
+      sql = "CREATE TABLE IF NOT EXISTS #{btn} ( LIKE #{quote_identifier(table)})"
       connection.execute(sql)
       btn
     end
 
 
     def eliminate_duplicates(table,key_columns)
-      
       # @@@ FIXME: handle tables where primary key is not named 'id'
       primary_key_name = quote_identifier('id')
 
-      backup_table_name = create_backup_table(table)
+      btn = create_backup_table(table)
       
-      # @@@ FIXME: guard against weird column and table names with quotes
       key_column_list = (key_columns.map {|kc| quote_identifier(kc)}).join(',')
+
       defunct_ids_sql = <<-"EOSQL"
         SELECT defunct_id FROM ( 
           SELECT MAX(#{primary_key_name}) AS defunct_id FROM #{quote_identifier(table)}
@@ -87,8 +83,17 @@ The table in question MUST have a primary key column named 'id'
         ) AS necessary_table_alias
       EOSQL
 
-      delete_dup_rows_sql = "DELETE FROM #{quote_identifier(table)} WHERE #{primary_key_name} IN (#{defunct_ids_sql})"
-      backup_rows_sql = "INSERT INTO #{quote_identifier(backup_table_name)} SELECT * FROM #{quote_identifier(table)} WHERE #{primary_key_name} IN (#{defunct_ids_sql})"
+      delete_dup_rows_sql = <<-"EOSQL"
+        DELETE FROM #{quote_identifier(table)}
+           WHERE #{primary_key_name} IN (#{defunct_ids_sql})
+      EOSQL
+
+      backup_rows_sql = <<-"EOSQL"
+        INSERT INTO #{btn}
+          SELECT * FROM #{quote_identifier(table)}
+            WHERE #{primary_key_name} IN (#{defunct_ids_sql})
+      EOSQL
+
       finished = false
       while !finished
         num_rows_backed_up = connection.update_sql(backup_rows_sql)
@@ -100,5 +105,14 @@ The table in question MUST have a primary key column named 'id'
         end
       end
     end
+
+    def restore_duplicates(table)
+      backup = backup_table_name(table)
+      restore_sql = <<-"EOSQL"
+        INSERT INTO #{quote_identifier(table)} SELECT * FROM #{backup}
+      EOSQL
+      num_rows_restored = connection.update_sql(restore_sql)
+    end
+
   end
 end
